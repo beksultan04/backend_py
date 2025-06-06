@@ -1,0 +1,128 @@
+import requests
+import mysql.connector
+
+client_id = '1517570'
+api_key = '2882c46e-cf80-4723-aed6-5399db007c2d'
+
+headers = {
+    'Client-Id': client_id,
+    'Api-Key': api_key,
+    'Content-Type': 'application/json'
+}
+
+url_list = 'https://api-seller.ozon.ru/v3/product/list'
+url_info = 'https://api-seller.ozon.ru/v3/product/info/list'
+url_description = 'https://api-seller.ozon.ru/v1/product/info/description'
+
+def get_offer_ids():
+    data = {
+        "filter": {
+            "offer_id": [],
+            "product_id": [],
+            "visibility": "ALL"
+        },
+        "last_id": "",
+        "limit": 200
+    }
+    response = requests.post(url_list, headers=headers, json=data)
+    response.raise_for_status()
+    response_json = response.json()
+    items = response_json.get("result", {}).get("items", [])
+    return [item["offer_id"] for item in items if "offer_id" in item]
+
+def get_description(offer_id):
+    body = {
+        "offer_id": offer_id,
+    }
+    response = requests.post(url_description, headers=headers, json=body)
+    if response.status_code == 200:
+        data = response.json()
+        return data.get("result", {}).get("description", "")
+    else:
+        print(f"Ошибка при получении описания для offer_id {offer_id}: {response.status_code} {response.text}")
+        return None
+
+def get_products_info(offer_ids):
+    body = {
+        "offer_id": offer_ids,
+        "product_id": [],
+        "sku": []
+    }
+    response = requests.post(url_info, headers=headers, json=body)
+    response.raise_for_status()
+    data = response.json()
+    return data.get("items", [])
+
+# Подключение к базе данных
+conn = mysql.connector.connect(
+    host='localhost',
+    user='root',
+    password='Iligiz2007',
+    database='ozon',
+    port=3306
+)
+cursor = conn.cursor()
+
+# Очищаем таблицы
+cursor.execute("SET FOREIGN_KEY_CHECKS=0;")
+cursor.execute("TRUNCATE TABLE foto_table;") 
+cursor.execute("TRUNCATE TABLE tovar_table;")  
+cursor.execute("TRUNCATE TABLE description;")  # Очистка таблицы описаний
+cursor.execute("SET FOREIGN_KEY_CHECKS=1;")
+conn.commit()
+
+offer_ids = get_offer_ids()
+
+batch_size = 50
+
+for i in range(0, len(offer_ids), batch_size):
+    batch = offer_ids[i:i + batch_size]
+    products = get_products_info(batch)
+
+    for item in products:
+        name_tovar = item.get("name")
+        price = item.get("price") or 0
+        old_price = item.get("old_price") 
+        min_price = item.get("min_price") 
+
+        stocks_info = item.get("stocks", {}).get("stocks", [])
+        stocks = sum(stock.get("count", 0) for stock in stocks_info)
+
+        volume_weight = item.get("volume_weight")
+        category_id_api = item.get("description_category_id")
+
+        # Вставляем товар
+        insert_tovar_query = """
+            INSERT INTO tovar_table 
+            (name_tovar, price, old_price, min_price, stocks, volume_weight, category_id_api)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """
+        cursor.execute(insert_tovar_query, (
+            name_tovar, price, old_price, min_price, stocks, volume_weight, category_id_api
+        ))
+
+        id_tovar = cursor.lastrowid
+
+        # Получаем и вставляем описание
+        description = get_description(item.get("offer_id"))
+        if description:
+            insert_description_query = """
+                INSERT INTO description (id_tovar, description)
+                VALUES (%s, %s)
+            """
+            cursor.execute(insert_description_query, (id_tovar, description))
+
+        # Вставляем фото
+        images = item.get("images", [])
+        for url_foto in images:
+            insert_foto_query = """
+                INSERT INTO foto_table (id_tovar, url_foto) VALUES (%s, %s)
+            """
+            cursor.execute(insert_foto_query, (id_tovar, url_foto))
+
+    conn.commit()
+
+cursor.close()
+conn.close()
+
+print("Данные успешно сохранены в базу")
