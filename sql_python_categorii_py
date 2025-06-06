@@ -1,0 +1,85 @@
+import requests
+import mysql.connector
+
+client_id = '1517570'
+api_key = '2882c46e-cf80-4723-aed6-5399db007c2d'
+url = 'https://api-seller.ozon.ru/'
+
+headers = {
+    'Client-Id': client_id,
+    'Api-Key': api_key,
+    'Content-Type': 'application/json'
+}
+data = {"language": "RU"}
+
+response = requests.post(f'{url}v1/description-category/tree', headers=headers, json=data)
+categories_data = response.json()
+
+def extract_types_with_parent(items, parent_api_id=None):
+    results = []
+    for item in items:
+        if 'description_category_id' in item and 'category_name' in item:
+            current_api_id = item['description_category_id']
+            results.append({
+                'api_id': current_api_id,
+                'name': item['category_name'],
+                'parent_api_id': parent_api_id 
+            })
+
+            if 'children' in item and item['children']:
+                results.extend(extract_types_with_parent(item['children'], current_api_id))
+
+        elif 'type_id' in item and 'type_name' in item:
+            current_api_id = item['type_id']
+            results.append({
+                'api_id': current_api_id,
+                'name': item['type_name'],
+                'parent_api_id': parent_api_id
+            })
+
+            if 'children' in item and item['children']:
+                results.extend(extract_types_with_parent(item['children'], current_api_id))
+
+    return results
+
+all_categories = extract_types_with_parent(categories_data.get('result', []))
+
+conn = mysql.connector.connect(
+    host='localhost',
+    user='root',
+    password='Iligiz2007',
+    database='ozon',
+    port=3306
+)
+cursor = conn.cursor()
+
+
+cursor.execute('TRUNCATE TABLE categories;')
+conn.commit()
+
+id_mapping = {}
+
+
+for idx, cat in enumerate(all_categories, start=1):
+    id_mapping[cat['api_id']] = idx
+    cursor.execute('''
+        INSERT INTO categories (id_categories, name_categories, category_id_api, parent_id)
+        VALUES (%s, %s, %s, %s)
+    ''', (idx, cat['name'], cat['api_id'], None)) 
+
+conn.commit()
+
+
+for cat in all_categories:
+    if cat['parent_api_id'] is not None:
+        parent_id = id_mapping.get(cat['parent_api_id'])
+        child_id = id_mapping[cat['api_id']]
+        cursor.execute('''
+            UPDATE categories SET parent_id = %s WHERE id_categories = %s
+        ''', (parent_id, child_id))
+
+conn.commit()
+
+cursor.close()
+conn.close()
+print('ok')
